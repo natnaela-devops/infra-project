@@ -1,0 +1,8 @@
+---
+- name: Prepare all nodes for RKE2 cluster (OS Hardening + Prerequisites)
+  hosts: k8s
+  become: true
+  gather_facts: true
+
+  roles:
+    - rke2_preparation

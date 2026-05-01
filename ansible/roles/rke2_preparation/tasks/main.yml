@@ -1,0 +1,141 @@
+---
+- name: Update and upgrade all packages (safe & idempotent)
+  apt:
+    update_cache: yes
+    upgrade: dist
+    autoremove: yes
+    autoclean: yes
+  register: apt_upgrade
+  retries: 3
+  delay: 10
+  until: apt_upgrade is success
+
+- name: Reboot if kernel was updated
+  reboot:
+    msg: "Rebooting after kernel upgrade for RKE2 preparation"
+    reboot_timeout: 300
+  when: apt_upgrade.changed and "'linux-image' in apt_upgrade.stdout"
+
+- name: Install required system tools and dependencies
+  apt:
+    name:
+      - curl
+      - wget
+      - git
+      - ca-certificates
+      - gnupg
+      - lsb-release
+      - software-properties-common
+      - apt-transport-https
+      - nfs-common
+      - open-iscsi
+      - jq
+      - iptables
+      - net-tools
+      - conntrack
+      - socat
+      - ipvsadm
+      - ipset
+      - ethtool
+    state: present
+    update_cache: yes
+
+# =============================================
+# OS Hardening & Kernel Tuning (Phase 1)
+# =============================================
+
+- name: Disable swap permanently
+  command: swapoff -a
+  when: ansible_swaptotal_mb > 0
+
+- name: Remove swap entry from /etc/fstab
+  mount:
+    name: "{{ item }}"
+    state: absent
+  loop:
+    - swap
+    - none
+
+- name: Set sysctl parameters for Kubernetes (best practices)
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: yes
+    sysctl_file: /etc/sysctl.d/99-k8s.conf
+  loop:
+    - { key: "net.ipv4.ip_forward", value: "1" }
+    - { key: "net.bridge.bridge-nf-call-iptables", value: "1" }
+    - { key: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
+    - { key: "net.ipv4.conf.all.rp_filter", value: "0" }
+    - { key: "net.ipv4.conf.default.rp_filter", value: "0" }
+    - { key: "vm.swappiness", value: "0" }
+    - { key: "vm.overcommit_memory", value: "1" }
+    - { key: "fs.inotify.max_user_watches", value: "1048576" }
+    - { key: "fs.inotify.max_user_instances", value: "512" }
+    - { key: "fs.file-max", value: "2097152" }
+
+- name: Optimize ulimits for Kubernetes nodes
+  copy:
+    content: |
+      * soft nofile 1048576
+      * hard nofile 1048576
+      * soft nproc 1048576
+      * hard nproc 1048576
+    dest: /etc/security/limits.d/99-k8s.conf
+    mode: '0644'
+
+- name: Load required kernel modules
+  modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+    - nf_conntrack
+    - ip_vs
+    - ip_vs_rr
+    - ip_vs_wrr
+    - ip_vs_sh
+
+- name: Persist kernel modules
+  copy:
+    content: |
+      overlay
+      br_netfilter
+      nf_conntrack
+      ip_vs
+      ip_vs_rr
+      ip_vs_wrr
+      ip_vs_sh
+    dest: /etc/modules-load.d/k8s.conf
+    mode: '0644'
+
+# =============================================
+# RKE2 Specific Preparation
+# =============================================
+
+- name: Create RKE2 directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - /etc/rancher/rke2
+    - /var/lib/rancher/rke2
+    - /var/lib/kubelet
+    - /etc/cni/net.d
+
+- name: Create RKE2 config directory (for later use)
+  file:
+    path: /etc/rancher/rke2
+    state: directory
+    mode: '0755'
+
+- name: Ensure iptables is using legacy version (critical for RKE2)
+  alternatives:
+    name: iptables
+    path: /usr/sbin/iptables-legacy
+  when: ansible_distribution_version is version('20.04', '>=')
