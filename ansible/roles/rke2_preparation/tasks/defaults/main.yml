@@ -1,4 +1,0 @@
----
-# Role defaults
-rke2_version: "v1.31.1+rke2r1"   # Update as needed
-rke2_channel: stable
